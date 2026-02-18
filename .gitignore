@@ -5,3 +5,5 @@ __pycache__/
 data/
 *.log
 .env
+deploy-check.sh
+deploy.log
