@@ -5,10 +5,12 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from typing import Callable, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
+from pydantic import BaseModel
 
 from adapters import ADAPTERS
 from extractors import PatternExtractor
@@ -26,6 +28,70 @@ outreach_gen = OutreachGenerator()
 @app.on_event("startup")
 async def startup():
     await db.init_db()
+
+
+async def _execute_pipeline(
+    run_id: str,
+    enabled_adapters: list,
+    adapter_configs: dict,
+    weight_overrides: dict,
+    progress_cb: Optional[Callable] = None,
+) -> list:
+    """Core pipeline: fetch, extract, rank, save. Returns saved prospects."""
+    if weight_overrides:
+        ranker.weights.update(weight_overrides)
+
+    all_prospects = []
+    log_entries = []
+
+    for adapter_key in enabled_adapters:
+        if adapter_key not in ADAPTERS:
+            continue
+        adapter = ADAPTERS[adapter_key]()
+        if progress_cb:
+            await progress_cb({
+                "type": "adapter_started",
+                "adapter": adapter_key,
+                "message": f"Fetching from {adapter.name}...",
+            })
+        try:
+            adapter_config = adapter_configs.get(adapter_key, {})
+            prospects = await adapter.fetch(adapter_config)
+            all_prospects.extend(prospects)
+            msg = f"{adapter.name}: found {len(prospects)} prospects"
+            log_entries.append(msg)
+            if progress_cb:
+                await progress_cb({
+                    "type": "adapter_done",
+                    "adapter": adapter_key,
+                    "count": len(prospects),
+                    "message": msg,
+                })
+        except Exception as e:
+            msg = f"{adapter.name}: error — {str(e)}"
+            log_entries.append(msg)
+            if progress_cb:
+                await progress_cb({
+                    "type": "adapter_error",
+                    "adapter": adapter_key,
+                    "message": msg,
+                })
+
+    if progress_cb:
+        await progress_cb({"type": "stage", "stage": "extracting", "message": "Extracting signals..."})
+    all_prospects = extractor.extract(all_prospects)
+
+    if progress_cb:
+        await progress_cb({"type": "stage", "stage": "ranking", "message": "Scoring and ranking..."})
+    all_prospects = ranker.rank(all_prospects)
+
+    if progress_cb:
+        await progress_cb({"type": "stage", "stage": "saving", "message": "Saving to database..."})
+    await db.save_prospects(run_id, all_prospects)
+    await db.save_run(run_id, "done", time.time(), time.time(),
+                      adapters_used=enabled_adapters, log=log_entries)
+
+    return await db.get_run_prospects(run_id)
 
 
 @app.get("/")
@@ -56,6 +122,32 @@ async def get_weights():
 @app.get("/api/runs")
 async def list_runs():
     return await db.get_all_runs()
+
+
+class RunRequest(BaseModel):
+    adapters: Optional[list] = None
+    adapter_configs: dict = {}
+    weights: dict = {}
+
+
+@app.post("/api/runs")
+async def trigger_run(request: RunRequest, background_tasks: BackgroundTasks):
+    """Trigger a pipeline run asynchronously. Returns run_id immediately."""
+    enabled_adapters = request.adapters or list(ADAPTERS.keys())
+    run_id = f"run_{int(time.time())}"
+    await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters)
+    background_tasks.add_task(
+        _execute_pipeline, run_id, enabled_adapters, request.adapter_configs, request.weights
+    )
+    return {"run_id": run_id, "status": "running"}
+
+
+@app.get("/api/runs/{run_id}/status")
+async def get_run_status(run_id: str):
+    run = await db.get_run_by_id(run_id)
+    if not run:
+        return {"error": "Run not found"}
+    return run
 
 
 @app.get("/api/runs/{run_id}")
@@ -89,62 +181,14 @@ async def run_pipeline(ws: WebSocket):
         adapter_configs = config.get("adapter_configs", {})
         weight_overrides = config.get("weights", {})
 
-        if weight_overrides:
-            ranker.weights.update(weight_overrides)
-
         run_id = f"run_{int(time.time())}"
         await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters)
-
         await ws.send_json({"type": "run_started", "run_id": run_id})
 
-        all_prospects = []
-        log_entries = []
-
-        for adapter_key in enabled_adapters:
-            if adapter_key not in ADAPTERS:
-                continue
-            adapter = ADAPTERS[adapter_key]()
-            await ws.send_json({
-                "type": "adapter_started",
-                "adapter": adapter_key,
-                "message": f"Fetching from {adapter.name}...",
-            })
-
-            try:
-                adapter_config = adapter_configs.get(adapter_key, {})
-                prospects = await adapter.fetch(adapter_config)
-                all_prospects.extend(prospects)
-                msg = f"{adapter.name}: found {len(prospects)} prospects"
-                log_entries.append(msg)
-                await ws.send_json({
-                    "type": "adapter_done",
-                    "adapter": adapter_key,
-                    "count": len(prospects),
-                    "message": msg,
-                })
-            except Exception as e:
-                msg = f"{adapter.name}: error — {str(e)}"
-                log_entries.append(msg)
-                await ws.send_json({
-                    "type": "adapter_error",
-                    "adapter": adapter_key,
-                    "message": msg,
-                })
-
-        await ws.send_json({"type": "stage", "stage": "extracting", "message": "Extracting signals..."})
-        all_prospects = extractor.extract(all_prospects)
-
-        await ws.send_json({"type": "stage", "stage": "ranking", "message": "Scoring and ranking..."})
-        all_prospects = ranker.rank(all_prospects)
-
-        # Save to DB
-        await ws.send_json({"type": "stage", "stage": "saving", "message": "Saving to database..."})
-        await db.save_prospects(run_id, all_prospects)
-        await db.save_run(run_id, "done", time.time(), time.time(),
-                          adapters_used=enabled_adapters, log=log_entries)
-
-        # Fetch back with DB IDs
-        saved = await db.get_run_prospects(run_id)
+        saved = await _execute_pipeline(
+            run_id, enabled_adapters, adapter_configs, weight_overrides,
+            progress_cb=ws.send_json,
+        )
 
         await ws.send_json({
             "type": "run_done",

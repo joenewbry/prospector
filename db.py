@@ -93,6 +93,19 @@ async def get_all_runs():
         return [dict(r) for r in rows]
 
 
+async def get_run_by_id(run_id: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("""
+            SELECT r.*, COUNT(p.id) as prospect_count
+            FROM runs r LEFT JOIN prospects p ON r.id = p.run_id
+            WHERE r.id = ?
+            GROUP BY r.id
+        """, (run_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
 async def get_run_prospects(run_id: str):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
