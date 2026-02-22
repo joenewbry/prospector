@@ -3,6 +3,15 @@ import os
 from .base import BaseAdapter, Prospect
 
 
+GAMING_QUERIES_X = [
+    "#indiedev browser game",
+    "#retrogaming arcade",
+    "#gamedev html5",
+    "free browser games",
+    "#screenshotsaturday arcade",
+]
+
+
 class XTwitterAdapter(BaseAdapter):
     name = "x_twitter"
     description = "Find job seekers and builders on X/Twitter. Requires Basic API key ($100/mo) for live search — uses mock data without one."
@@ -35,13 +44,17 @@ class XTwitterAdapter(BaseAdapter):
         }
 
     async def fetch(self, config: dict) -> list[Prospect]:
+        campaign = config.get("campaign", "memex")
         bearer = config.get("bearer_token") or os.environ.get("X_BEARER_TOKEN", "")
         if not bearer:
+            if campaign == "openarcade":
+                return self._gaming_mock_data(config)
             return self._mock_data(config)
-        return await self._live_fetch(config, bearer)
+        return await self._live_fetch(config, bearer, campaign)
 
-    async def _live_fetch(self, config: dict, bearer: str) -> list[Prospect]:
-        queries = config.get("queries", self.get_config_schema()["queries"]["default"])
+    async def _live_fetch(self, config: dict, bearer: str, campaign: str = "memex") -> list[Prospect]:
+        default_queries = GAMING_QUERIES_X if campaign == "openarcade" else self.get_config_schema()["queries"]["default"]
+        queries = config.get("queries", default_queries)
         max_per = config.get("max_results_per_query", 20)
         prospects = []
         seen = set()
@@ -156,6 +169,72 @@ class XTwitterAdapter(BaseAdapter):
             ))
 
         return prospects
+
+    def _gaming_mock_data(self, config: dict) -> list[Prospect]:
+        """Return realistic gaming-focused mock data for OpenArcade campaign."""
+        mocks = [
+            ("retro_replay_yt", "RetroReplay", "Retro gaming YouTuber | 50K subs | Weekly reviews of classic arcade games | Pac-Man enthusiast | DMs open for collabs",
+             "#retrogaming arcade", ["gaming_youtuber", "gaming_retro", "gaming_arcade"]),
+            ("pixelquest_stream", "PixelQuest", "Twitch streamer | Retro arcade + indie browser games | 12K followers | Streaming since 2019 | Game recommendations welcome",
+             "#retrogaming arcade", ["gaming_streamer", "gaming_retro", "gaming_browser"]),
+            ("indiegame_weekly", "IndieGameWeekly", "Reviewing indie and browser games every Friday | 8K newsletter subscribers | Always looking for hidden gems | Submit your game!",
+             "#indiedev browser game", ["gaming_reviewer", "gaming_browser", "gaming_indiedev"]),
+            ("arcade_nostalgia", "ArcadeNostalgia", "Celebrating the golden age of arcade games | Collector + player | Documenting arcade history | Tetris world record attempt in progress",
+             "#retrogaming arcade", ["gaming_retro", "gaming_arcade", "active_in_gaming"]),
+            ("html5_gamedev", "HTML5GameDev", "Making browser games with Phaser.js and vanilla JS | #gamedev | Open source game engine contributor | Game jam veteran",
+             "#gamedev html5", ["gaming_indiedev", "gaming_browser", "has_game_repos"]),
+            ("casualgamer_sam", "CasualGamerSam", "I play free browser games so you don't have to | Reviews + rankings | 15K followers | Love puzzle and arcade games",
+             "free browser games", ["gaming_reviewer", "gaming_browser", "active_in_gaming"]),
+            ("screenshotsarah", "ScreenshotSarah", "Game dev | #screenshotsaturday regular | Building a retro-style arcade platformer | Pixel art + chiptune music",
+             "#screenshotsaturday arcade", ["gaming_indiedev", "gaming_retro", "gaming_arcade"]),
+            ("webgame_hub", "WebGameHub", "Curating the best free browser games | Daily recommendations | 20K followers | DM me your browser game!",
+             "free browser games", ["gaming_reviewer", "gaming_browser", "active_in_gaming"]),
+            ("retro_dev_mike", "RetroDevMike", "Remaking classic arcade games in JavaScript | Space Invaders clone got 500 stars on GitHub | Full-stack by day, game dev by night",
+             "#gamedev html5", ["gaming_indiedev", "gaming_retro", "gaming_arcade", "has_game_repos"]),
+            ("gamejam_junkie", "GameJamJunkie", "48-hour game jam addict | 15+ jams completed | Ludum Dare regular | Browser games only | Always down to playtest",
+             "#indiedev browser game", ["gaming_indiedev", "gaming_browser", "active_in_gaming"]),
+            ("pacman_stan", "PacManStan", "Pac-Man speedrunner | Classic arcade game historian | Writing a book about the golden age of arcades | 10K followers",
+             "#retrogaming arcade", ["gaming_retro", "gaming_arcade", "active_in_gaming"]),
+            ("indie_arcade_blog", "IndieArcadeBlog", "Blogging about indie arcade games since 2020 | Game reviews, developer interviews | 5K monthly readers",
+             "#indiedev browser game", ["gaming_blogger", "gaming_arcade", "gaming_indiedev"]),
+        ]
+
+        prospects = []
+        for username, name, bio, query, signals in mocks:
+            prospects.append(Prospect(
+                source="x_twitter",
+                username=username,
+                display_name=name,
+                profile_url=f"https://x.com/{username}",
+                bio=bio,
+                category=self._categorize_gaming(bio, signals, query),
+                signals=signals,
+                raw_data={
+                    "tweet_text": f"[Mock] Based on query: {query}",
+                    "followers": 0,
+                    "query_matched": query,
+                    "is_mock": True,
+                },
+            ))
+
+        return prospects
+
+    def _categorize_gaming(self, bio: str, signals: list, query: str) -> str:
+        if "gaming_youtuber" in signals:
+            return "Gaming YouTuber"
+        if "gaming_streamer" in signals:
+            return "Retro Gaming Streamer"
+        if "gaming_reviewer" in signals:
+            return "Game Reviewer"
+        if "gaming_blogger" in signals:
+            return "Gaming Content Creator"
+        if "gaming_retro" in signals and "gaming_indiedev" not in signals:
+            return "Retro Enthusiast"
+        if "gaming_indiedev" in signals:
+            return "Indie Game Dev"
+        if "gaming_browser" in signals:
+            return "Browser Game Enthusiast"
+        return "Game Developer"
 
     def _extract_signals(self, bio: str, tweet: str, query: str) -> list:
         signals = []

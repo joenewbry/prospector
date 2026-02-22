@@ -71,6 +71,11 @@ async def list_tools() -> List[Tool]:
                         "type": "object",
                         "description": "Scoring weight overrides (e.g. {'trust_gap': 0.5, 'reachability': 0.3}).",
                     },
+                    "campaign": {
+                        "type": "string",
+                        "enum": ["memex", "openarcade"],
+                        "description": "Campaign to run. 'memex' (default) finds developers for Memex outreach. 'openarcade' finds gaming enthusiasts, influencers, and platforms for OpenArcade promotion.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -202,6 +207,8 @@ async def _dispatch(name: str, args: dict) -> Any:
             body["adapter_configs"] = args["adapter_configs"]
         if args.get("weights"):
             body["weights"] = args["weights"]
+        if args.get("campaign"):
+            body["campaign"] = args["campaign"]
         return await http_post("/api/runs", body)
 
     elif name == "get-run-status":

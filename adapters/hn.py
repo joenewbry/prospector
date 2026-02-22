@@ -4,6 +4,14 @@ from .base import BaseAdapter, Prospect
 
 HN_ALGOLIA = "https://hn.algolia.com/api/v1"
 
+GAMING_SEARCH_QUERIES = [
+    "browser game",
+    "web games",
+    "retro arcade",
+    "html5 game",
+    "Show HN game",
+]
+
 
 class HackerNewsAdapter(BaseAdapter):
     name = "hackernews"
@@ -32,13 +40,88 @@ class HackerNewsAdapter(BaseAdapter):
         }
 
     async def fetch(self, config: dict) -> list[Prospect]:
+        campaign = config.get("campaign", "memex")
+        if campaign == "openarcade":
+            return await self._fetch_gaming(config)
+        return await self._fetch_hiring(config)
+
+    async def _fetch_gaming(self, config: dict) -> list[Prospect]:
+        """Search HN stories and comments about browser games and gaming."""
+        max_results = config.get("max_results", 50)
+        prospects = []
+        seen = set()
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            for query in GAMING_SEARCH_QUERIES:
+                try:
+                    # Search stories about gaming
+                    resp = await client.get(
+                        f"{HN_ALGOLIA}/search",
+                        params={
+                            "query": query,
+                            "tags": "story",
+                            "hitsPerPage": min(max_results, 20),
+                        },
+                    )
+                    if resp.status_code != 200:
+                        continue
+
+                    stories = resp.json().get("hits", [])
+                    for story in stories:
+                        author = story.get("author") or "unknown"
+                        if author in seen:
+                            continue
+                        seen.add(author)
+
+                        title = story.get("title") or ""
+                        url = story.get("url") or ""
+                        text_lower = f"{title} {url}".lower()
+
+                        signals = ["active_in_gaming"]
+                        if "show hn" in title.lower():
+                            signals.append("show_hn_poster")
+                        if any(kw in text_lower for kw in ["browser", "web", "html5", "javascript"]):
+                            signals.append("gaming_browser")
+                        if any(kw in text_lower for kw in ["retro", "arcade", "classic"]):
+                            signals.append("gaming_retro")
+                        if any(kw in text_lower for kw in ["indie", "jam"]):
+                            signals.append("gaming_indiedev")
+                        if story.get("points", 0) > 50:
+                            signals.append("high_engagement_post")
+
+                        clean_bio = re.sub(r'<[^>]+>', ' ', title)
+                        clean_bio = re.sub(r'\s+', ' ', clean_bio).strip()
+
+                        prospects.append(Prospect(
+                            source="hackernews",
+                            username=author,
+                            display_name=author,
+                            profile_url=f"https://news.ycombinator.com/user?id={author}",
+                            bio=clean_bio,
+                            category=self._categorize_gaming(text_lower, signals),
+                            signals=signals,
+                            raw_data={
+                                "story_title": title,
+                                "story_url": url,
+                                "story_id": story.get("objectID"),
+                                "points": story.get("points", 0),
+                                "query_matched": query,
+                                "created_at": story.get("created_at"),
+                            },
+                        ))
+                except httpx.TimeoutException:
+                    continue
+
+        return prospects
+
+    async def _fetch_hiring(self, config: dict) -> list[Prospect]:
+        """Original hiring thread search for memex campaign."""
         thread_type = config.get("thread_type", "Who wants to be hired?")
         months_back = config.get("months_back", 2)
         max_results = config.get("max_results", 50)
         prospects = []
 
         async with httpx.AsyncClient(timeout=30) as client:
-            # Use the whoishiring bot's posts — these are the official monthly threads
             thread_keyword = thread_type.split("?")[0].strip()
             resp = await client.get(
                 f"{HN_ALGOLIA}/search_by_date",
@@ -51,8 +134,6 @@ class HackerNewsAdapter(BaseAdapter):
                 return prospects
 
             all_threads = resp.json().get("hits", [])
-
-            # Filter to matching thread type
             matching = [t for t in all_threads if thread_keyword.lower() in (t.get("title") or "").lower()]
             threads = matching[:months_back]
 
@@ -65,7 +146,6 @@ class HackerNewsAdapter(BaseAdapter):
                 if not story_id:
                     continue
 
-                # Get comments from this thread
                 comment_resp = await client.get(
                     f"{HN_ALGOLIA}/search",
                     params={
@@ -139,6 +219,17 @@ class HackerNewsAdapter(BaseAdapter):
                     ))
 
         return prospects
+
+    def _categorize_gaming(self, text: str, signals: list) -> str:
+        if "show_hn_poster" in signals:
+            return "Game Developer"
+        if "gaming_retro" in signals:
+            return "Retro Enthusiast"
+        if "gaming_indiedev" in signals:
+            return "Indie Game Dev"
+        if "gaming_browser" in signals:
+            return "Browser Game Enthusiast"
+        return "Game Developer"
 
     def _categorize(self, text: str, signals: list, thread_type: str) -> str:
         if "Who is hiring" in thread_type:

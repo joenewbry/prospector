@@ -35,6 +35,7 @@ async def _execute_pipeline(
     enabled_adapters: list,
     adapter_configs: dict,
     weight_overrides: dict,
+    campaign: str = "memex",
     progress_cb: Optional[Callable] = None,
 ) -> list:
     """Core pipeline: fetch, extract, rank, save. Returns saved prospects."""
@@ -56,6 +57,7 @@ async def _execute_pipeline(
             })
         try:
             adapter_config = adapter_configs.get(adapter_key, {})
+            adapter_config["campaign"] = campaign
             prospects = await adapter.fetch(adapter_config)
             all_prospects.extend(prospects)
             msg = f"{adapter.name}: found {len(prospects)} prospects"
@@ -79,11 +81,11 @@ async def _execute_pipeline(
 
     if progress_cb:
         await progress_cb({"type": "stage", "stage": "extracting", "message": "Extracting signals..."})
-    all_prospects = extractor.extract(all_prospects)
+    all_prospects = extractor.extract(all_prospects, campaign=campaign)
 
     if progress_cb:
         await progress_cb({"type": "stage", "stage": "ranking", "message": "Scoring and ranking..."})
-    all_prospects = ranker.rank(all_prospects)
+    all_prospects = ranker.rank(all_prospects, campaign=campaign)
 
     if progress_cb:
         await progress_cb({"type": "stage", "stage": "saving", "message": "Saving to database..."})
@@ -128,6 +130,7 @@ class RunRequest(BaseModel):
     adapters: Optional[list] = None
     adapter_configs: dict = {}
     weights: dict = {}
+    campaign: str = "memex"
 
 
 @app.post("/api/runs")
@@ -135,9 +138,9 @@ async def trigger_run(request: RunRequest, background_tasks: BackgroundTasks):
     """Trigger a pipeline run asynchronously. Returns run_id immediately."""
     enabled_adapters = request.adapters or list(ADAPTERS.keys())
     run_id = f"run_{int(time.time())}"
-    await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters)
+    await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters, campaign=request.campaign)
     background_tasks.add_task(
-        _execute_pipeline, run_id, enabled_adapters, request.adapter_configs, request.weights
+        _execute_pipeline, run_id, enabled_adapters, request.adapter_configs, request.weights, request.campaign
     )
     return {"run_id": run_id, "status": "running"}
 
@@ -167,7 +170,9 @@ async def generate_outreach(prospect_id: int):
     prospect = await db.get_prospect_by_id(prospect_id)
     if not prospect:
         return {"error": "Prospect not found"}
-    message, deep_profile = await outreach_gen.generate(prospect)
+    # Determine campaign from the run this prospect belongs to
+    campaign = await db.get_run_campaign(prospect.get("run_id", ""))
+    message, deep_profile = await outreach_gen.generate(prospect, campaign=campaign)
     await db.update_prospect_outreach(prospect_id, message, deep_profile)
     return {"message": message, "deep_profile": deep_profile}
 
@@ -180,14 +185,15 @@ async def run_pipeline(ws: WebSocket):
         enabled_adapters = config.get("adapters", list(ADAPTERS.keys()))
         adapter_configs = config.get("adapter_configs", {})
         weight_overrides = config.get("weights", {})
+        campaign = config.get("campaign", "memex")
 
         run_id = f"run_{int(time.time())}"
-        await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters)
+        await db.save_run(run_id, "running", time.time(), adapters_used=enabled_adapters, campaign=campaign)
         await ws.send_json({"type": "run_started", "run_id": run_id})
 
         saved = await _execute_pipeline(
             run_id, enabled_adapters, adapter_configs, weight_overrides,
-            progress_cb=ws.send_json,
+            campaign=campaign, progress_cb=ws.send_json,
         )
 
         await ws.send_json({

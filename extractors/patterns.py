@@ -35,29 +35,82 @@ REACHABILITY_SIGNALS = {
     "build_in_public": 0.3,
 }
 
+# Gaming influence signals — used for openarcade campaign
+# Repurposes trust_gap_score field as an "influence score"
+GAMING_INFLUENCE_SIGNALS = {
+    "gaming_youtuber": 0.9,
+    "gaming_streamer": 0.8,
+    "gaming_reviewer": 0.8,
+    "gaming_blogger": 0.7,
+    "gaming_retro": 0.6,
+    "gaming_arcade": 0.7,
+    "gaming_browser": 0.8,
+    "gaming_indiedev": 0.5,
+    "has_game_repos": 0.3,
+    "active_in_gaming": 0.5,
+    "show_hn_poster": 0.4,
+    "high_engagement_post": 0.5,
+    "gaming_platform": 0.8,
+    "gaming_submission_target": 0.3,
+    "game_portal": 0.6,
+    "game_review_site": 0.7,
+    "game_aggregator": 0.5,
+    "gaming_community": 0.5,
+}
+
+GAMING_REACHABILITY_SIGNALS = {
+    "has_github": 0.3,
+    "has_website": 0.5,
+    "gaming_platform": 0.6,
+    "game_portal": 0.5,
+    "gaming_submission_target": 0.6,
+    "active_in_gaming": 0.3,
+    "gaming_youtuber": 0.5,
+    "gaming_streamer": 0.5,
+    "gaming_reviewer": 0.4,
+    "gaming_blogger": 0.4,
+    "show_hn_poster": 0.3,
+}
+
+GAMING_RELEVANCE_CATEGORIES = {
+    "Gaming YouTuber": 0.95,
+    "Retro Gaming Streamer": 0.90,
+    "Game Reviewer": 0.90,
+    "Gaming Content Creator": 0.85,
+    "Browser Game Enthusiast": 0.85,
+    "Gaming Platform": 0.90,
+    "Retro Enthusiast": 0.80,
+    "Game Developer": 0.60,
+    "Indie Game Dev": 0.65,
+    "Game Jam Participant": 0.60,
+}
+
 
 class PatternExtractor:
     """Extract and enrich signals from prospects."""
 
-    def extract(self, prospects: list[Prospect]) -> list[Prospect]:
+    def extract(self, prospects: list[Prospect], campaign: str = "memex") -> list[Prospect]:
         for p in prospects:
-            p.trust_gap_score = self._score_trust_gap(p)
-            p.reachability_score = self._score_reachability(p)
-            p.relevance_score = self._score_relevance(p)
+            if campaign == "openarcade":
+                p.trust_gap_score = self._score_gaming_influence(p)
+                p.reachability_score = self._score_gaming_reachability(p)
+                p.relevance_score = self._score_gaming_relevance(p)
+            else:
+                p.trust_gap_score = self._score_trust_gap(p)
+                p.reachability_score = self._score_reachability(p)
+                p.relevance_score = self._score_relevance(p)
         return prospects
 
     def _score_trust_gap(self, p: Prospect) -> float:
         score = 0.0
         for signal in p.signals:
             score += TRUST_GAP_SIGNALS.get(signal, 0.1)
-        # Normalize to 0-1
         return min(score / 3.0, 1.0)
 
     def _score_reachability(self, p: Prospect) -> float:
         score = 0.0
         for signal in p.signals:
             score += REACHABILITY_SIGNALS.get(signal, 0.0)
-        # Bonus for having links in raw_data
         if p.raw_data.get("github_url"):
             score += 0.3
         if p.raw_data.get("linkedin_url"):
@@ -85,3 +138,25 @@ class PatternExtractor:
             "Startup Hiring": 0.6,
         }
         return high_relevance_categories.get(p.category, 0.5)
+
+    # --- Gaming campaign scoring ---
+
+    def _score_gaming_influence(self, p: Prospect) -> float:
+        """Influence score for gaming campaign (stored in trust_gap_score field)."""
+        score = 0.0
+        for signal in p.signals:
+            score += GAMING_INFLUENCE_SIGNALS.get(signal, 0.05)
+        return min(score / 2.5, 1.0)
+
+    def _score_gaming_reachability(self, p: Prospect) -> float:
+        score = 0.0
+        for signal in p.signals:
+            score += GAMING_REACHABILITY_SIGNALS.get(signal, 0.0)
+        if p.raw_data.get("story_url"):
+            score += 0.2
+        if p.raw_data.get("contact_role"):
+            score += 0.4
+        return min(score / 2.0, 1.0)
+
+    def _score_gaming_relevance(self, p: Prospect) -> float:
+        return GAMING_RELEVANCE_CATEGORIES.get(p.category, 0.5)

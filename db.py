@@ -17,7 +17,8 @@ async def init_db():
                 started_at REAL,
                 finished_at REAL,
                 adapters_used TEXT,
-                log TEXT
+                log TEXT,
+                campaign TEXT DEFAULT 'memex'
             );
             CREATE TABLE IF NOT EXISTS prospects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,16 +45,23 @@ async def init_db():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_prospects_source_user_run
                 ON prospects(run_id, source, username);
         """)
+        # Migration: add campaign column if it doesn't exist (for existing DBs)
+        try:
+            await db.execute("ALTER TABLE runs ADD COLUMN campaign TEXT DEFAULT 'memex'")
+            await db.commit()
+        except Exception:
+            pass  # Column already exists
 
 
 async def save_run(run_id: str, status: str, started_at: float,
-                   finished_at: float = None, adapters_used: list = None, log: list = None):
+                   finished_at: float = None, adapters_used: list = None, log: list = None,
+                   campaign: str = "memex"):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT OR REPLACE INTO runs (id, status, started_at, finished_at, adapters_used, log)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO runs (id, status, started_at, finished_at, adapters_used, log, campaign)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (run_id, status, started_at, finished_at,
-              json.dumps(adapters_used or []), json.dumps(log or [])))
+              json.dumps(adapters_used or []), json.dumps(log or []), campaign))
         await db.commit()
 
 
@@ -104,6 +112,15 @@ async def get_run_by_id(run_id: str) -> dict | None:
         """, (run_id,))
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+
+async def get_run_campaign(run_id: str) -> str:
+    """Get the campaign for a run. Returns 'memex' as default."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT campaign FROM runs WHERE id = ?", (run_id,))
+        row = await cursor.fetchone()
+        return (dict(row).get("campaign") or "memex") if row else "memex"
 
 
 async def get_run_prospects(run_id: str):

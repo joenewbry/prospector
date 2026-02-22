@@ -4,15 +4,19 @@ import logging
 logger = logging.getLogger(__name__)
 
 MEMEX_GITHUB = "https://github.com/joenewbry/memex"
+OPENARCADE_URL = "https://arcade.digitalsurfacelabs.com"
 
 
 class OutreachGenerator:
     """Generates personalized outreach by doing a deep lookup on each person."""
 
-    async def generate(self, prospect: dict) -> tuple[str, dict]:
+    async def generate(self, prospect: dict, campaign: str = "memex") -> tuple[str, dict]:
         """Returns (message, deep_profile) after researching the person."""
         deep = await self._deep_lookup(prospect)
-        message = self._compose(prospect, deep)
+        if campaign == "openarcade":
+            message = self._compose_openarcade(prospect, deep)
+        else:
+            message = self._compose(prospect, deep)
         return message, deep
 
     async def _deep_lookup(self, p: dict) -> dict:
@@ -314,3 +318,107 @@ Would you be open to a 15-minute call to see if this makes sense as a student to
 — Joe
 joenewbry@gmail.com
 {MEMEX_GITHUB}""".strip()
+
+    # --- OpenArcade campaign outreach ---
+
+    def _compose_openarcade(self, p: dict, deep: dict) -> str:
+        if p.get("source") == "gaming_platforms":
+            return self._compose_gaming_platform(p)
+        return self._compose_gaming_individual(p, deep)
+
+    def _compose_gaming_individual(self, p: dict, deep: dict) -> str:
+        first_name = (p.get("display_name") or p.get("username", "")).split()[0]
+        source_story = self._gaming_source_story(p)
+        specific_hook = self._find_gaming_hook(p, deep)
+        category = p.get("category", "")
+
+        hook_line = f"\n{specific_hook}." if specific_hook else ""
+        question = self._gaming_question(category)
+
+        return f"""Hey {first_name},
+
+I {source_story}.{hook_line}
+
+I built OpenArcade ({OPENARCADE_URL}) — 100+ free browser arcade games. Pac-Man, Tetris, Space Invaders, plus modern indie games and remixes. No login, no ads, just play.
+
+{question}
+
+— Joe""".strip()
+
+    def _compose_gaming_platform(self, p: dict) -> str:
+        raw = p.get("raw_data", {})
+        name = p.get("display_name", "")
+        contact_role = raw.get("contact_role", "the team")
+        pitch = raw.get("pitch_angle", "")
+
+        return f"""Hi {contact_role} at {name},
+
+I built OpenArcade — a free browser arcade with 100+ games including classic arcade, indie, puzzle, racing, and remixes. All playable instantly in-browser, no downloads or login required.
+
+{pitch}
+
+Would you be open to featuring it or adding it to your directory?
+
+— Joe
+{OPENARCADE_URL}""".strip()
+
+    def _gaming_source_story(self, p: dict) -> str:
+        source = p.get("source", "")
+        raw = p.get("raw_data", {})
+        query = raw.get("query_matched", "")
+
+        if source == "github":
+            if query:
+                return f"found your GitHub profile searching for \"{query}\""
+            return "came across your GitHub profile"
+        elif source == "hackernews":
+            story_title = raw.get("story_title", "")
+            if story_title:
+                return f"saw your HN post \"{story_title}\""
+            return "found your post on Hacker News"
+        elif source == "x_twitter":
+            if query:
+                return f"found you via \"{query}\" on X"
+            return "came across your post on X"
+        return "found your profile"
+
+    def _find_gaming_hook(self, p: dict, deep: dict) -> str:
+        details = deep.get("details", {})
+        bio = p.get("bio", "")
+        raw = p.get("raw_data", {})
+
+        # Check for starred repos
+        top_repos = details.get("top_repos", [])
+        game_repos = [r for r in top_repos if any(kw in (r.get("name") or "").lower() or (r.get("description") or "").lower()
+                       for kw in ["game", "arcade", "retro", "pixel", "phaser"])]
+        if game_repos:
+            best = game_repos[0]
+            desc = f" ({best['description']})" if best.get("description") else ""
+            return f"Your repo \"{best['name']}\"{desc} caught my eye"
+
+        # HN story
+        story_title = raw.get("story_title", "")
+        if story_title and "game" in story_title.lower():
+            return f"Your post about \"{story_title}\" resonated"
+
+        # Bio details
+        if bio and len(bio) > 20:
+            for marker in ["review", "stream", "play", "retro", "arcade", "classic", "pixel"]:
+                if marker in bio.lower():
+                    return f"Love that you're into {marker} gaming"
+
+        return ""
+
+    def _gaming_question(self, category: str) -> str:
+        mapping = {
+            "Gaming YouTuber": "Would your audience be into a video showcasing 100+ free browser arcade games? I think it'd make great content.",
+            "Retro Gaming Streamer": "Would you be up for streaming some of these classics? I'd love to see your take on the retro collection.",
+            "Game Reviewer": "Would you be interested in reviewing the collection? I'd love honest feedback on the game selection.",
+            "Gaming Content Creator": "Would a feature on 100+ free browser arcade games fit your content? Happy to give you anything you need for a write-up.",
+            "Browser Game Enthusiast": "What classic games do you think are missing? I'm always looking to expand the collection.",
+            "Retro Enthusiast": "What classic arcade games do you think every collection needs? I want to make sure the essentials are covered.",
+            "Game Developer": "As a game dev, what would make you want to contribute a game to a free arcade collection like this?",
+            "Indie Game Dev": "Would you be interested in having one of your games featured in the arcade? Always looking for cool indie titles.",
+            "Game Jam Participant": "Would you want to submit any of your jam games to the arcade? Great way to get more eyes on them.",
+        }
+        return mapping.get(category, "What do you think — would you play these? I'd love your honest take.")

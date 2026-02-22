@@ -3,6 +3,19 @@ from datetime import datetime, timedelta
 from .base import BaseAdapter, Prospect
 
 
+GAMING_QUERIES = [
+    "retro gaming",
+    "arcade games",
+    "browser games javascript",
+    "html5 game",
+    "phaser.js",
+    "game jam",
+    "pixel art games",
+    "game reviewer",
+    "indie game dev",
+]
+
+
 class GitHubAdapter(BaseAdapter):
     name = "github"
     description = "Find developers on GitHub with trust gaps: sparse commits, no portfolio, career changers. Filters to recently active users only."
@@ -35,7 +48,9 @@ class GitHubAdapter(BaseAdapter):
         }
 
     async def fetch(self, config: dict) -> list[Prospect]:
-        queries = config.get("queries", self.get_config_schema()["queries"]["default"])
+        campaign = config.get("campaign", "memex")
+        default_queries = GAMING_QUERIES if campaign == "openarcade" else self.get_config_schema()["queries"]["default"]
+        queries = config.get("queries", default_queries)
         max_per = config.get("max_results_per_query", 20)
         recency = config.get("recency_months", 6)
         prospects = []
@@ -104,13 +119,23 @@ class GitHubAdapter(BaseAdapter):
                             if kw in bio_lower:
                                 signals.append(kw.replace("-", "_").replace("#", ""))
 
+                        # Gaming-specific signals
+                        if campaign == "openarcade":
+                            for kw in ["game", "arcade", "retro", "pixel", "phaser", "gamedev", "game jam", "game dev",
+                                        "streamer", "youtuber", "youtube", "twitch", "reviewer", "gaming"]:
+                                if kw in bio_lower:
+                                    signals.append(f"gaming_interest_{kw.replace(' ', '_')}")
+                            # Check repos for game-related content
+                            if profile.get("public_repos", 0) > 0:
+                                signals.append("has_game_repos")
+
                         prospects.append(Prospect(
                             source="github",
                             username=login,
                             display_name=profile.get("name") or login,
                             profile_url=profile["html_url"],
                             bio=bio,
-                            category=self._categorize(bio, signals, query),
+                            category=self._categorize(bio, signals, query, campaign),
                             signals=signals,
                             raw_data={
                                 "public_repos": profile.get("public_repos", 0),
@@ -130,8 +155,26 @@ class GitHubAdapter(BaseAdapter):
 
         return prospects
 
-    def _categorize(self, bio: str, signals: list, query: str) -> str:
+    def _categorize(self, bio: str, signals: list, query: str, campaign: str = "memex") -> str:
         bio_lower = bio.lower()
+
+        if campaign == "openarcade":
+            # Gaming-specific categorization
+            if any(s.startswith("gaming_interest_youtuber") or s.startswith("gaming_interest_youtube") for s in signals):
+                return "Gaming YouTuber"
+            if any(s.startswith("gaming_interest_streamer") or s.startswith("gaming_interest_twitch") for s in signals):
+                return "Retro Gaming Streamer"
+            if any(s.startswith("gaming_interest_reviewer") for s in signals):
+                return "Game Reviewer"
+            if any(s.startswith("gaming_interest_retro") or s.startswith("gaming_interest_arcade") for s in signals):
+                return "Retro Enthusiast"
+            if "game jam" in query.lower() or any(s.startswith("gaming_interest_game_jam") for s in signals):
+                return "Game Jam Participant"
+            if any(s.startswith("gaming_interest_") for s in signals):
+                return "Game Developer"
+            return "Game Developer"
+
+        # Memex categorization (original)
         if "bootcamp" in bio_lower or "bootcamp" in query.lower():
             return "Bootcamp Graduate"
         if "self_taught" in signals or "self-taught" in query.lower():
